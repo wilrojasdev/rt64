@@ -329,12 +329,18 @@ namespace RT64 {
         pipelineDesc.specConstants = c.specConstants.data();
         pipelineDesc.specConstantsCount = uint32_t(c.specConstants.size());
 
-        // Alpha blending is performed by using dual source blending. The blending factor will be in the secondary output.
+        // Alpha blending is performed by using dual source blending — the blend
+        // factor is written to the pixel shader's secondary output. On devices
+        // that don't support dualSrcBlend (Mali Valhall G57 on Samsung A24
+        // observed in Phase 11), fall back to single-source SRC_ALPHA / INV_SRC_ALPHA.
+        // This loses the precise N64 blender emulation but renders something
+        // instead of crashing the driver during pipeline creation.
+        const bool dualSrcBlendSupported = c.device->getCapabilities().dualSourceBlend;
         RenderBlendDesc &targetBlend = pipelineDesc.renderTargetBlend[0];
         if (c.alphaBlend) {
             targetBlend.blendEnabled = true;
-            targetBlend.srcBlend = RenderBlend::SRC1_ALPHA;
-            targetBlend.dstBlend = RenderBlend::INV_SRC1_ALPHA;
+            targetBlend.srcBlend = dualSrcBlendSupported ? RenderBlend::SRC1_ALPHA : RenderBlend::SRC_ALPHA;
+            targetBlend.dstBlend = dualSrcBlendSupported ? RenderBlend::INV_SRC1_ALPHA : RenderBlend::INV_SRC_ALPHA;
             targetBlend.blendOp = RenderBlendOperation::ADD;
         }
 

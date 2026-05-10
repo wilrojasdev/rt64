@@ -13,6 +13,10 @@ option(RT64_STATIC "Build RT64 as a static library" OFF)
 
 option(RT64_SDL_WINDOW_VULKAN "Build RT64 to expect an SDL Window outside of Windows" OFF)
 
+# Android spike mode: skip host-side tools (file_to_c, texture_hasher, ...) and
+# skip shader compilation. Lets us measure C++ portability of rt64 in isolation.
+option(RT64_ANDROID_SPIKE "Skip shaders and host tools for Android cross-compile spike" OFF)
+
 if (NOT ${RT64_STATIC})
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
@@ -35,19 +39,27 @@ function(preprocess INFILE OUTFILE OPTIONS)
     endif()
 endfunction()
 
+# Target-side runtime concerns: NOMINMAX define and dxcompiler.dll next to the
+# Windows binary.
 if (WIN32)
-    set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
     add_compile_definitions(NOMINMAX)
 
     # Dependencies that must be next to the DLL.
     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxil.dll" "dxil.dll" COPYONLY)
-elseif (APPLE)
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-        # find zlib and include in dyld path
-        find_library(ZLIB_LIBRARY NAMES z)
-        get_filename_component(ZLIB_PATH ${ZLIB_LIBRARY} DIRECTORY)
+endif()
 
+# DXC and spirv-cross run on the build host, not the target. Pick the binary
+# matching the host platform so cross-compiles (e.g. macOS arm64 host targeting
+# Android arm64) work correctly.
+if (CMAKE_HOST_WIN32)
+    set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+elseif (CMAKE_HOST_APPLE)
+    # find zlib and include in dyld path
+    find_library(ZLIB_LIBRARY NAMES z)
+    get_filename_component(ZLIB_PATH ${ZLIB_LIBRARY} DIRECTORY)
+
+    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
         set (DXC "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64:${ZLIB_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-macos")
         set (SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/lib/x64:$ENV{DYLD_LIBRARY_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/bin/x64/spirv-cross")
     else()
@@ -55,7 +67,7 @@ elseif (APPLE)
         set (SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/lib/arm64:$ENV{DYLD_LIBRARY_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/bin/arm64/spirv-cross")
     endif()
 else()
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
     else()
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
@@ -65,13 +77,86 @@ endif()
 set(ZSTD_LEGACY_SUPPORT OFF)
 set(ZSTD_BUILD_STATIC ON)
 set(ZSTD_BUILD_SHARED OFF)
+if (ANDROID)
+    # zstd's dictBuilder calls qsort_r(), which Bionic (Android libc) doesn't
+    # provide. rt64 only uses compression/decompression, never dictionary
+    # training, so dropping dictBuilder is safe and avoids vendoring a shim.
+    # Programs (zstd CLI) and tests are also unnecessary for rt64.
+    set(ZSTD_BUILD_DICTBUILDER OFF)
+    set(ZSTD_BUILD_PROGRAMS OFF)
+    set(ZSTD_BUILD_TESTS OFF)
+endif()
 
-add_subdirectory(src/tools/file_to_c)
-add_subdirectory(src/contrib/re-spirv)
-add_subdirectory(src/contrib/nativefiledialog-extended)
+if (ANDROID)
+    # Cross-compile to Android: file_to_c must run on the host during build to
+    # convert shader blobs into embedded .c arrays. file_to_c.cpp is a single
+    # standalone translation unit (only standard library, no project deps) so
+    # we skip a nested CMake — that path leaks the NDK toolchain via env vars
+    # and pairs the wrong libc++ with the host system headers. Direct compile
+    # is bullet-proof.
+    if (CMAKE_HOST_APPLE)
+        # Pin to /usr/bin/clang++ (Apple's). The NDK ships its own clang++ on
+        # PATH; if find_program picks that up, its libc++ will mismatch the
+        # macOS SDK headers and break <charconv>/<filesystem>.
+        find_program(_HOST_CXX_COMPILER clang++ PATHS /usr/bin NO_DEFAULT_PATH REQUIRED)
+        execute_process(
+            COMMAND xcrun --show-sdk-path
+            OUTPUT_VARIABLE _HOST_SYSROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        set(_HOST_EXTRA_FLAGS -isysroot ${_HOST_SYSROOT})
+    elseif (CMAKE_HOST_WIN32)
+        find_program(_HOST_CXX_COMPILER NAMES cl clang++ g++ REQUIRED)
+        set(_HOST_EXTRA_FLAGS "")
+    else()
+        # On Linux pin to /usr/bin too, for the same reason.
+        find_program(_HOST_CXX_COMPILER NAMES g++ clang++ c++ PATHS /usr/bin NO_DEFAULT_PATH REQUIRED)
+        set(_HOST_EXTRA_FLAGS "")
+    endif()
+
+    set(FILE_TO_C_HOST_BIN ${CMAKE_BINARY_DIR}/host_tools/file_to_c)
+    if (NOT EXISTS ${FILE_TO_C_HOST_BIN})
+        message(STATUS "Compiling host file_to_c -> ${FILE_TO_C_HOST_BIN}")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/host_tools
+        )
+        execute_process(
+            COMMAND ${_HOST_CXX_COMPILER}
+                -std=c++17 -O2
+                ${_HOST_EXTRA_FLAGS}
+                -o ${FILE_TO_C_HOST_BIN}
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/tools/file_to_c/file_to_c.cpp
+            RESULT_VARIABLE _file_to_c_result
+        )
+        if (NOT _file_to_c_result EQUAL 0)
+            message(FATAL_ERROR "Failed to compile host file_to_c (exit ${_file_to_c_result})")
+        endif()
+    endif()
+    add_executable(file_to_c IMPORTED GLOBAL)
+    set_target_properties(file_to_c PROPERTIES IMPORTED_LOCATION ${FILE_TO_C_HOST_BIN})
+elseif (NOT RT64_ANDROID_SPIKE)
+    add_subdirectory(src/tools/file_to_c)
+endif()
+
+if (NOT RT64_ANDROID_SPIKE OR ANDROID)
+    # re-spirv MUST be cross-compiled for Android: rt64_raster_shader.cpp
+    # uses respv::Optimizer::run to inline spec constants into the SPIR-V
+    # at pipeline-creation time, and the output is what's handed to
+    # vkCreateShaderModule. Stubbing it out leaves codeSize=0 shaders that
+    # SIGSEGV inside the Mali driver. SPIRV-Headers is header-only and
+    # cross-compiles cleanly.
+    add_subdirectory(src/contrib/re-spirv)
+endif()
+if (NOT RT64_ANDROID_SPIKE)
+    add_subdirectory(src/contrib/nativefiledialog-extended)
+endif()
+
+# zstd cross-compiles cleanly to arm64-v8a; always include it.
+# (re-spirv and nfd are deferred — re-spirv hasn't been audited for Android yet,
+# and nfd is replaced by the Storage Access Framework on Android in Phase 7.)
 add_subdirectory(src/contrib/zstd/build/cmake)
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR ANDROID) AND RT64_SDL_WINDOW_VULKAN)
     set(PLUME_SDL_VULKAN_ENABLED TRUE)
 elseif (APPLE)
     set(PLUME_APPLE_RETINA_ENABLED OFF)
@@ -286,6 +371,14 @@ if (WIN32)
     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
     set(SDL2_LIBRARIES "SDL2" "SDL2main")
     link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+elseif (ANDROID)
+    # SDL2 is consumed via headers only on Android; the runtime SDL2 lib is
+    # provided by the APK (SDLActivity). Point at a host-side SDL2 headers tree
+    # for the spike. Override with -DSDL2_INCLUDE_DIRS=... if needed.
+    if (NOT SDL2_INCLUDE_DIRS)
+        set(SDL2_INCLUDE_DIRS "/opt/homebrew/include/SDL2")
+    endif()
+    set(SDL2_LIBRARIES "")
 else()
     find_package(SDL2 REQUIRED)
 endif()
@@ -298,7 +391,7 @@ add_compile_definitions(
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR ANDROID) AND RT64_SDL_WINDOW_VULKAN)
     add_compile_definitions("PLUME_SDL_VULKAN_ENABLED")
     add_compile_definitions("RT64_SDL_WINDOW_VULKAN")
 endif()
@@ -437,14 +530,20 @@ set_target_properties(rt64 PROPERTIES OUTPUT_NAME "rt64")
 set_target_properties(rt64 PROPERTIES PREFIX "")
 
 # Add common libraries.
-target_link_libraries(rt64 re-spirv)
-target_link_libraries(rt64 nfd)
+if (NOT RT64_ANDROID_SPIKE OR ANDROID)
+    target_link_libraries(rt64 re-spirv)
+endif()
+if (NOT RT64_ANDROID_SPIKE)
+    target_link_libraries(rt64 nfd)
+endif()
 target_link_libraries(rt64 libzstd_static)
 target_link_libraries(rt64 plume)
 
 # Add tools.
-add_subdirectory(src/tools/texture_hasher)
-add_subdirectory(src/tools/texture_packer)
+if (NOT RT64_ANDROID_SPIKE)
+    add_subdirectory(src/tools/texture_hasher)
+    add_subdirectory(src/tools/texture_packer)
+endif()
 
 # Add any Apple-specific source files and libraries
 if (APPLE)

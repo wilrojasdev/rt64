@@ -11,6 +11,8 @@
 #if defined(_WIN32)
 #   include <Windows.h>
 #   include <ShellScalingAPI.h>
+#elif defined(__ANDROID__)
+#   include <android/native_window.h>
 #elif defined(__linux__)
 #   define Status int
 #   if !defined(RT64_SDL_WINDOW_VULKAN)
@@ -104,7 +106,12 @@ namespace RT64 {
         bounds.width = rect.right - rect.left;
         bounds.height = rect.bottom - rect.top;
 #   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
+        // ApplicationWindow::setup(title, listener) is desktop-only. On Android the
+        // NativeActivity owns the surface and rt64 receives an ANativeWindow* via
+        // setup(RenderWindow, listener, threadId) instead. Reaching this branch at
+        // runtime indicates a launcher wiring bug.
+        assert(false && "Android: use setup(RenderWindow, listener, threadId) — NativeActivity owns the surface");
+        return;
 #   elif defined(__linux__) || defined(__APPLE__)
         if (SDL_VideoInit(nullptr) != 0) {
             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
@@ -148,7 +155,9 @@ namespace RT64 {
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         windowHandle = sdlWindow;
 #   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
+        // Unreachable on Android: the assert+return above guarded the SDL path.
+        assert(false && "Android: setup(title, listener) reached the SDL handle extraction branch");
+        return;
 #   elif defined(__linux__)
         windowHandle.display = wmInfo.info.x11.display;
         windowHandle.window = wmInfo.info.x11.window;
@@ -288,6 +297,12 @@ namespace RT64 {
         }
 
         refreshRate = displayMode.refresh_rate;
+#   elif defined(__ANDROID__)
+        // Stub: real implementation should query AChoreographer / AConfiguration
+        // for the device's actual refresh rate (60 / 90 / 120 Hz). 60 Hz keeps
+        // the rest of rt64's frame-time logic sane until that's wired through
+        // the NativeActivity callback path.
+        refreshRate = 60;
 #   elif defined(__linux__)
         // Sourced from: https://stackoverflow.com/a/66865623
         XRRScreenResources *screenResources = XRRGetScreenResources(windowHandle.display, windowHandle.window);
@@ -343,6 +358,10 @@ namespace RT64 {
         newWindowTop = rect.top;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
+#   elif defined(__ANDROID__)
+        // NativeActivity surfaces are fullscreen and don't move. Leave both
+        // coordinates at INT32_MAX so the (windowLeft != newWindowLeft)
+        // comparison matches the initial state and reports "not moved".
 #   elif defined(__linux__)
         XWindowAttributes attributes;
         XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
