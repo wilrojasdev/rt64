@@ -7,9 +7,11 @@
 
 [[vk::push_constant]] ConstantBuffer<FbCommonCB> gConstants : register(b0, space0);
 Buffer<uint> gNewInput : register(t1, space0);
-RWTexture2D<float4> gOutputChangeColor : register(u0, space1);
-RWTexture2D<float> gOutputChangeDepth : register(u1, space1);
-RWTexture2D<uint> gOutputChangeBoolean : register(u2, space1);
+// See FbReadAnyChangesCS for the rationale; format-unknown so storage
+// image aliasing across framebuffer formats works under strict drivers.
+[[vk::image_format("unknown")]] RWTexture2D<float4> gOutputChangeColor : register(u0, space1);
+[[vk::image_format("unknown")]] RWTexture2D<float>  gOutputChangeDepth : register(u1, space1);
+[[vk::image_format("unknown")]] RWTexture2D<uint>   gOutputChangeBoolean : register(u2, space1);
 
 [numthreads(FB_COMMON_WORKGROUP_SIZE, FB_COMMON_WORKGROUP_SIZE, 1)]
 void CSMain(uint2 coord : SV_DispatchThreadID) {
