@@ -252,7 +252,7 @@ namespace RT64 {
 #               ifdef __ANDROID__
                 {
                     static std::atomic<int> s_viLookupLogged{0};
-                    if (s_viLookupLogged.fetch_add(1) < 10) {
+                    if (s_viLookupLogged.fetch_add(1) < 2000) {
                         // Build a string of every drawn FB with its live dims so we can
                         // see whether the (addr, width, siz) keys collide with VI's lookup.
                         char drawnBuf[512];
@@ -449,7 +449,7 @@ namespace RT64 {
 #                   ifdef __ANDROID__
                     {
                         static std::atomic<int> s_viBindLogged{0};
-                        if (s_viBindLogged.fetch_add(1) < 10) {
+                        if (s_viBindLogged.fetch_add(1) < 2000) {
                             const uint32_t ctAddr = (colorTarget != nullptr) ? colorTarget->addressForName : 0;
                             const uint32_t ctRev = (colorTarget != nullptr) ? colorTarget->textureRevision : 0;
                             const void* mainTex = (colorTarget != nullptr) ? (void*)colorTarget->texture.get() : nullptr;

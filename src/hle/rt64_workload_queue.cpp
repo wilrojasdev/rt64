@@ -217,8 +217,9 @@ namespace RT64 {
         // Mali Valhall G57 on the A24 can't sustain BK64 at the desktop's
         // 5× WindowIntegerScale (each frame is ~25× the fillrate of N64
         // native). Cap the multiplier so the game thread isn't permanently
-        // back-pressured by the render thread. 2× keeps a bit of antialiasing.
-        resolutionMultiplier = std::min(resolutionMultiplier, 2.0f);
+        // back-pressured by the render thread.
+        // Temporarily 1× while diagnosing the file-select menu black screen.
+        resolutionMultiplier = std::min(resolutionMultiplier, 1.0f);
 #       endif
 
         // Build the resolution scale vector from the configuration.
@@ -625,9 +626,38 @@ namespace RT64 {
             }
 #       endif
 
+#           ifdef __ANDROID__
+            // Diagnostic for the file-select menu black-screen: log per-frame
+            // fbPair counts so we can see whether the game submits zero pairs,
+            // pairs with empty drawColorRect, or pairs that getTargetsFromPair
+            // rejects for another reason.
+            {
+                static std::atomic<int> s_fbPairLogged{0};
+                if (s_fbPairLogged.fetch_add(1) < 1000) {
+                    uint32_t emptyCount = 0;
+                    for (uint32_t f = 0; f < fbPairCount; f++) {
+                        if (workload.fbPairs[f].drawColorRect.isEmpty()) emptyCount++;
+                    }
+                    __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                        "Workload: fbPairCount=%u emptyRect=%u gameCalls=%u",
+                        fbPairCount, emptyCount, workload.gameCallCount);
+                }
+            }
+#           endif
+
             for (uint32_t f = 0; f < fbPairCount; f++) {
                 const FramebufferPair &fbPair = workload.fbPairs[f];
-                if (getTargetsFromPair(f)) {
+                const bool targetsOk = getTargetsFromPair(f);
+#               ifdef __ANDROID__
+                {
+                    const auto &cr = fbPair.drawColorRect;
+                    __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                        "FBPair[%u]: colorAddr=0x%08x w=%u rectEmpty=%d gameCalls=%u targetsOk=%d",
+                        f, fbPair.colorImage.address, fbPair.colorImage.width,
+                        cr.isEmpty() ? 1 : 0, fbPair.gameCallCount, targetsOk ? 1 : 0);
+                }
+#               endif
+                if (targetsOk) {
                     RenderFramebufferStorage &fbStorage = renderFramebufferManager->get(fbKey, colorTarget, (depthTarget != nullptr) ? depthTarget : dummyDepthTarget.get());
                     FramebufferRenderer::DrawParams drawParams;
                     drawParams.worker = ext.workloadGraphicsWorker;
@@ -802,6 +832,12 @@ namespace RT64 {
                         }
                     }
                     
+#                   ifdef __ANDROID__
+                    __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                        "preRecord: f=%u framebufferIndex=%u colorAddr=0x%08x",
+                        f, framebufferIndex,
+                        colorTarget ? colorTarget->addressForName : 0);
+#                   endif
                     framebufferRenderer->recordFramebuffer(ext.workloadGraphicsWorker, framebufferIndex++);
 
                     // Transition the render targets in case the present queue will show them so it doesn't have to perform transitions.

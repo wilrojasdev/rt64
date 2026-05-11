@@ -689,16 +689,13 @@ namespace RT64 {
 
 #       ifdef __ANDROID__
         {
-            static std::atomic<int> s_sceneLogged{0};
-            if (s_sceneLogged.fetch_add(1) < 30) {
-                const uint32_t addr = (fbStorage->colorTarget != nullptr) ? fbStorage->colorTarget->addressForName : 0;
-                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
-                    "SCENE: this=%p addr=0x%08x instances=%zu draws=%u skipped=%u "
-                    "fills=%u firstFillIdx=%d lastDrawIdx=%d",
-                    (void*)this, addr, rasterScene.instanceIndices.size(),
-                    s_drawsIssued, s_scissorSkips, s_fillRects,
-                    s_firstFillIdx, s_lastDrawIdx);
-            }
+            const uint32_t addr = (fbStorage->colorTarget != nullptr) ? fbStorage->colorTarget->addressForName : 0;
+            __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                "SCENE: this=%p addr=0x%08x instances=%zu draws=%u skipped=%u "
+                "fills=%u firstFillIdx=%d lastDrawIdx=%d",
+                (void*)this, addr, rasterScene.instanceIndices.size(),
+                s_drawsIssued, s_scissorSkips, s_fillRects,
+                s_firstFillIdx, s_lastDrawIdx);
         }
 #       endif
 
@@ -1311,16 +1308,13 @@ namespace RT64 {
 
 #       ifdef __ANDROID__
         {
-            static std::atomic<int> s_recFbLogged{0};
-            if (s_recFbLogged.fetch_add(1) < 30) {
-                const uint32_t addr = (colorTarget != nullptr) ? colorTarget->addressForName : 0;
-                const void* tex = (colorTarget != nullptr) ? (void*)colorTarget->texture.get() : nullptr;
-                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
-                    "RECFB: this=%p addr=0x%08x tex=%p scenes=%zu rasters=%zu",
-                    (void*)this, addr, tex,
-                    targetDrawCall.sceneIndices.size(),
-                    targetDrawCall.rasterScenes.size());
-            }
+            const uint32_t addr = (colorTarget != nullptr) ? colorTarget->addressForName : 0;
+            const void* tex = (colorTarget != nullptr) ? (void*)colorTarget->texture.get() : nullptr;
+            __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                "RECFB: this=%p addr=0x%08x tex=%p scenes=%zu rasters=%zu",
+                (void*)this, addr, tex,
+                targetDrawCall.sceneIndices.size(),
+                targetDrawCall.rasterScenes.size());
         }
 #       endif
 
