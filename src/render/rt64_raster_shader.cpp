@@ -6,6 +6,14 @@
 
 #include "xxHash/xxh3.h"
 
+// Phase 12 B.2: log every ubershader pipeline creation result to find out
+// whether Mali Valhall G57 silently rejects pipelines (returns null) or
+// builds them successfully (but produces no fragments — a deeper bug).
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <atomic>
+#endif
+
 #include "shaders/RenderParams.hlsli.rw.h"
 #include "shaders/RasterPSDynamic.hlsl.spirv.h"
 #include "shaders/RasterPSDynamicMS.hlsl.spirv.h"
@@ -592,6 +600,16 @@ namespace RT64 {
             else {
                 pipelines[pipelineIndex] = RasterShader::createPipeline(creation);
             }
+
+#           ifdef __ANDROID__
+            __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                "UberPipeline: idx=%u zCmp=%d zUpd=%d cvgAdd=%d ptr=%p",
+                pipelineIndex,
+                creation.zCmp ? 1 : 0,
+                creation.zUpd ? 1 : 0,
+                creation.cvgAdd ? 1 : 0,
+                (void*)pipelines[pipelineIndex].get());
+#           endif
         }
     }
 
@@ -617,6 +635,19 @@ namespace RT64 {
     }
 
     const RenderPipeline *RasterShaderUber::getPipeline(bool zCmp, bool zUpd, bool cvgAdd) const {
-        return pipelines[pipelineStateIndex(zCmp, zUpd, cvgAdd)].get();
+        const RenderPipeline *p = pipelines[pipelineStateIndex(zCmp, zUpd, cvgAdd)].get();
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_getPipelineLogged{0};
+            if (s_getPipelineLogged.fetch_add(1) < 20) {
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "UberGet: zCmp=%d zUpd=%d cvgAdd=%d idx=%u ptr=%p",
+                    zCmp ? 1 : 0, zUpd ? 1 : 0, cvgAdd ? 1 : 0,
+                    pipelineStateIndex(zCmp, zUpd, cvgAdd),
+                    (void*)p);
+            }
+        }
+#       endif
+        return p;
     }
 };

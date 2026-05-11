@@ -317,7 +317,9 @@ void PSMain(
     , bool isFrontFace : SV_IsFrontFace
 #endif
     , [[vk::location(0)]] [[vk::index(0)]] out float4 pixelColor : SV_TARGET0
+#if !defined(NO_DUAL_SOURCE)
     , [[vk::location(0)]] [[vk::index(1)]] out float4 pixelAlpha : SV_TARGET1
+#endif
 )
 {
 #if !defined(DYNAMIC_RENDER_PARAMS)
@@ -334,6 +336,8 @@ void PSMain(
     }
 
     pixelColor = resultColor;
+#if !defined(NO_DUAL_SOURCE)
     pixelAlpha = resultAlpha;
+#endif
 }
 #endif

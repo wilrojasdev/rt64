@@ -209,6 +209,20 @@ if(NOT RT64_DIAG_VI_MODE STREQUAL "0")
     list(APPEND RT64_VI_EXTRA_DXC "-D" "RT64_DIAG_VI_MODE=${RT64_DIAG_VI_MODE}")
 endif()
 
+# Mali Valhall G57 (and likely other dualSrcBlend-less drivers) route the
+# pixel shader's SV_TARGET1 output into the color attachment when the
+# pipeline has dualSrcBlend disabled — a spec violation that turns the
+# whole frame into whatever color we wrote to pixelAlpha. When this option
+# is ON the DYNAMIC ubershader is compiled without the SV_TARGET1 / pixelAlpha
+# output entirely, so the driver has nothing to misroute. SPEC_CONSTANT
+# variants keep the dual-source declaration (their DXC dead-code-elimination
+# breaks if it's removed — see RasterPS.hlsl top-of-file comment).
+option(RT64_NO_DUAL_SOURCE_DYNAMIC_PS "Strip SV_TARGET1/pixelAlpha from RasterPSDynamic variants" OFF)
+set(RT64_DYNAMIC_PS_EXTRA_DXC "")
+if(RT64_NO_DUAL_SOURCE_DYNAMIC_PS)
+    list(APPEND RT64_DYNAMIC_PS_EXTRA_DXC "-D" "NO_DUAL_SOURCE")
+endif()
+
 function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     # Sentinel arg: when "--strip-image-format-unknown" appears in the args,
     # filter it out before invoking DXC and append a post-process step that
@@ -630,8 +644,8 @@ if (${WIN32})
     build_library_shader(rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSLibrary.hlsl")
 endif()
 
-build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC})
-build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_DYNAMIC_PS_EXTRA_DXC})
+build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_DYNAMIC_PS_EXTRA_DXC})
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC})
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" ${RT64_RASTER_PS_EXTRA_DXC})
