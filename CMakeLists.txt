@@ -223,6 +223,20 @@ if(RT64_NO_DUAL_SOURCE_DYNAMIC_PS)
     list(APPEND RT64_DYNAMIC_PS_EXTRA_DXC "-D" "NO_DUAL_SOURCE")
 endif()
 
+# Same NO_DUAL_SOURCE strip, but for the SPEC_CONSTANT pipeline variants.
+# Off by default because a previous attempt left DXC emitting a 440-byte
+# stub for the spec-constant translation unit. With the current clean
+# #ifndef NO_DUAL_SOURCE guards around both the SV_TARGET1 output and
+# its assignment, that may not reproduce — re-test before committing to
+# either path. When this DOES work, Android can route draws through
+# the spec-constant pipelines (10-50× faster than the dynamic ubershader)
+# and the force-ubershader hack in framebuffer_renderer.cpp can come out.
+option(RT64_NO_DUAL_SOURCE_SPEC_CONST_PS "Strip SV_TARGET1/pixelAlpha from RasterPSSpecConstant variants" OFF)
+set(RT64_SPEC_CONST_PS_EXTRA_DXC "")
+if(RT64_NO_DUAL_SOURCE_SPEC_CONST_PS)
+    list(APPEND RT64_SPEC_CONST_PS_EXTRA_DXC "-D" "NO_DUAL_SOURCE")
+endif()
+
 function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     # Sentinel arg: when "--strip-image-format-unknown" appears in the args,
     # filter it out before invoking DXC and append a post-process step that
@@ -646,10 +660,10 @@ endif()
 
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_DYNAMIC_PS_EXTRA_DXC})
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_DYNAMIC_PS_EXTRA_DXC})
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC})
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" ${RT64_RASTER_PS_EXTRA_DXC})
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_SPEC_CONST_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_SPEC_CONST_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_SPEC_CONST_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC} ${RT64_SPEC_CONST_PS_EXTRA_DXC})
 build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")

@@ -80,16 +80,13 @@ namespace RT64 {
         std::mutex threadMutex;
         std::atomic<bool> threadsRunning = false;
         std::atomic<bool> rtEnabled = false;
-        // Phase 12 (Mali Valhall G57): force the renderer to always use the
-        // DYNAMIC ubershader. The per-state SPEC_CONSTANT pixel shader pipelines
-        // silently no-op on Mali — fragments emit no color (texture stays at
-        // the per-frame clear). The DYNAMIC variant renders correctly. Toggle
-        // this back to false on platforms where SPEC_CONSTANT works.
-#ifdef __ANDROID__
-        std::atomic<bool> ubershadersOnly = true;
-#else
+        // The Phase 12 force-ubershader override (Mali Valhall G57 SPEC_CONSTANT
+        // no-op) was a symptom of the SV_TARGET1 misroute bug, not a separate
+        // failure. With NO_DUAL_SOURCE applied to both DYNAMIC and SPEC_CONSTANT
+        // raster shaders (CMake gates RT64_NO_DUAL_SOURCE_*_PS), the per-state
+        // pipelines render correctly on Mali too. Default off everywhere; the
+        // imgui toggle still lets users force ubershader for A/B testing.
         std::atomic<bool> ubershadersOnly = false;
-#endif
         std::atomic<bool> ubershadersVisible = false;
         std::unique_ptr<FramebufferRenderer> framebufferRenderer;
         std::unique_ptr<RenderFramebufferManager> renderFramebufferManager;

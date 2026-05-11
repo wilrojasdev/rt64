@@ -335,8 +335,17 @@ void PSMain(
         discard;
     }
 
+#if defined(NO_DUAL_SOURCE)
+    // Without dual-source blend, the pipeline uses SRC_ALPHA / INV_SRC_ALPHA
+    // on this single output. resultColor.a is the color combiner's alpha
+    // output (typically coverage); resultAlpha carries the N64 blender's
+    // per-pixel mix factor. The blender factor is what the driver should
+    // actually treat as transparency — using it here approximates the dual-
+    // source path closely enough that sprite edges, particles, and decal
+    // overlays stop painting their texture-atlas background as solid color.
+    pixelColor = float4(resultColor.rgb, resultAlpha.a);
+#else
     pixelColor = resultColor;
-#if !defined(NO_DUAL_SOURCE)
     pixelAlpha = resultAlpha;
 #endif
 }

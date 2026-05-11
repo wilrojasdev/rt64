@@ -350,18 +350,8 @@ namespace RT64 {
         // Create the shader caches.
         // Estimate the amount of shader compiler threads by trying to use about half of the system's available threads.
         // We need the ubershader pipelines done as soon as possible, so we use a different thread count that demands more of the system.
-#       ifdef __ANDROID__
-        // Android always routes draws through the DYNAMIC ubershader
-        // (framebuffer_renderer.cpp:1696 force), so the SPEC_CONSTANT
-        // compile threads pressure the CPU during boot with pipelines
-        // that are never used. Skip them and give the ubershader path
-        // every available thread.
-        const uint32_t rasterShaderThreads = 0;
-        const uint32_t ubershaderThreads = uint32_t(std::max(int(threadsAvailable) - 1, 1));
-#       else
         const uint32_t rasterShaderThreads = std::max(threadsAvailable / 2U, 1U);
         const uint32_t ubershaderThreads = uint32_t(std::max(int(threadsAvailable) - 2, 1));
-#       endif
         rasterShaderCache = std::make_unique<RasterShaderCache>(rasterShaderThreads, ubershaderThreads);
         rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling);
 

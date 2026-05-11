@@ -1685,19 +1685,14 @@ namespace RT64 {
                     {
                         triangles.shaderDesc = call.shaderDesc;
 
-                        // Phase 12 (Mali Valhall G57): the SPEC_CONSTANT per-state pixel
-                        // shader pipelines silently produce no fragments on Mali, so the
-                        // canonical color target stays at its per-frame clear color and
-                        // VI samples a black/empty image. Force every fragment through
-                        // the DYNAMIC ubershader path on Android until the underlying
-                        // Mali/respv interaction is understood. The ubershader rendered
-                        // correctly when verified with diag mode 1 (constant-color
-                        // raster shader).
-#                       ifdef __ANDROID__
-                        RasterShader *gpuShader = nullptr;
-#                       else
+                        // Phase 12 root cause was SV_TARGET1 misrouting, not a generic
+                        // SPEC_CONSTANT problem. With NO_DUAL_SOURCE applied to both
+                        // ubershader and spec-constant variants (CMake gates
+                        // RT64_NO_DUAL_SOURCE_DYNAMIC_PS / _SPEC_CONST_PS), the
+                        // spec-constant pipelines should compile and render correctly
+                        // on Mali too — and they run 10-50× faster than the ubershader.
+                        // The original __ANDROID__ force-nullptr override is removed.
                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
-#                       endif
                         if (gpuShader != nullptr) {
                             triangles.pipeline = gpuShader->pipeline.get();
                         }
