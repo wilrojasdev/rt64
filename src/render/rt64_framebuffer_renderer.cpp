@@ -571,7 +571,19 @@ namespace RT64 {
                 }
 
                 const auto &triangles = drawCall.triangles;
+#               ifdef __ANDROID__
+                // Skip draws whose pipeline isn't ready yet. On Mali the
+                // ubershader pipeline compile is async (~24 s total) and the
+                // game thread no longer blocks for it; until pipelines[i]
+                // for a given (zCmp,zUpd,cvgAdd) state is non-null, drop
+                // those calls instead of binding null and crashing the driver.
+                // The user sees content fade in as the compile finishes.
+                if (triangles.pipeline == nullptr) {
+                    continue;
+                }
+#               else
                 assert(triangles.pipeline != nullptr);
+#               endif
 
                 // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
                 if (triangles.scissor.isEmpty()) {

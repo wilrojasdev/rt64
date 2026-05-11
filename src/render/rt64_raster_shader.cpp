@@ -492,14 +492,29 @@ namespace RT64 {
         creation.usesHDR = shaderLibrary->usesHDR;
         creation.multisampling = multisampling;
 
-        uint32_t threadIndex = 0;
-        for (uint32_t i = 0; i < pipelineCount; i++) {
+        // Pin pipelines 0 (zCmp=0,zUpd=0,cvgAdd=0) and 3 (zCmp=1,zUpd=1,cvgAdd=0)
+        // to thread 0 in that order so the early-boot waiter blocks only until
+        // both are ready. BK64's intro starts with idx=3 draws, so without
+        // forcing this order the user sees skipped fragments for the first
+        // ~12 s (the time idx=3 would naturally come up in the round-robin).
+        // Other pipelines stay round-robin across the remaining threads.
+        auto pushCreation = [&](uint32_t i, uint32_t t) {
             creation.zCmp = i & (1 << 0);
             creation.zUpd = i & (1 << 1);
             creation.cvgAdd = i & (1 << 2);
+            pipelineThreadCreations[t].emplace_back(creation);
+        };
 
-            pipelineThreadCreations[threadIndex].emplace_back(creation);
+        pushCreation(0, 0);
+        pushCreation(3, 0);
+
+        uint32_t threadIndex = 1 % threadCount;
+        for (uint32_t i = 0; i < pipelineCount; i++) {
+            if (i == 0 || i == 3) continue; // already pinned
+            pushCreation(i, threadIndex);
             threadIndex = (threadIndex + 1) % threadCount;
+            // If threadCount==1 (degenerate), we'll fall back through 0 again
+            // and pile the rest on thread 0. That's fine — it preserves order.
         }
 
         // Spawn the threads that will compile all the pipelines.
@@ -578,20 +593,24 @@ namespace RT64 {
     }
 
     void RasterShaderUber::threadCreatePipelines(uint32_t threadIndex) {
-        // Delay the creation of all other pipelines until the first pipeline is created. This can help the
-        // driver reuse its shader cache between pipelines and achieve a much lower creation time than if
-        // all threads started at the same time.
+        // Delay the creation of all other pipelines until thread 0 has
+        // finished the two early-boot pipelines (idx=0 and idx=3, pinned in
+        // that order by the constructor). The driver reuses shader cache
+        // state across compiles, so a serialized prelude + a parallel rest
+        // beats N parallel compiles starting cold. The boot waiter blocks
+        // on pipelines[0] && pipelines[3] so the splash dismisses as soon
+        // as both are ready.
         if (threadIndex > 0) {
             std::unique_lock<std::mutex> lock(firstPipelineMutex);
             firstPipelineCondition.wait(lock, [this]() {
-                return (pipelines[0] != nullptr);
+                return pipelines[0] != nullptr && pipelines[3] != nullptr;
             });
         }
 
         for (const PipelineCreation &creation : pipelineThreadCreations[threadIndex]) {
             uint32_t pipelineIndex = pipelineStateIndex(creation.zCmp, creation.zUpd, creation.cvgAdd);
 
-            if (pipelineIndex == 0) {
+            if (pipelineIndex == 0 || pipelineIndex == 3) {
                 firstPipelineMutex.lock();
                 pipelines[pipelineIndex] = RasterShader::createPipeline(creation);
                 firstPipelineMutex.unlock();
