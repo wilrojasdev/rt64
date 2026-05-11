@@ -213,6 +213,14 @@ namespace RT64 {
 
         uint32_t msaaSampleCount = ext.sharedResources->userConfig.msaaSampleCount();
 
+#       ifdef __ANDROID__
+        // Mali Valhall G57 on the A24 can't sustain BK64 at the desktop's
+        // 5× WindowIntegerScale (each frame is ~25× the fillrate of N64
+        // native). Cap the multiplier so the game thread isn't permanently
+        // back-pressured by the render thread. 2× keeps a bit of antialiasing.
+        resolutionMultiplier = std::min(resolutionMultiplier, 2.0f);
+#       endif
+
         // Build the resolution scale vector from the configuration.
         workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
         workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
