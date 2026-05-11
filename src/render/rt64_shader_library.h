@@ -16,6 +16,7 @@ namespace RT64 {
         SamplerLibrary samplerLibrary;
         bool usesHDR = false;
         bool usesHardwareResolve = false;
+        RenderFormat swapChainFormat = RenderFormat::B8G8R8A8_UNORM;
 
         // All shaders.
         ShaderRecord bicubicScaling;
@@ -58,7 +59,7 @@ namespace RT64 {
         ShaderRecord videoInterfaceNearest;
         ShaderRecord videoInterfacePixel;
 
-        ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
+        ShaderLibrary(bool usesHDR, bool usesHardwareResolve, RenderFormat swapChainFormat = RenderFormat::B8G8R8A8_UNORM);
         ~ShaderLibrary();
         void setupCommonShaders(RenderInterface *rhi, RenderDevice *device);
         void setupMultisamplingShaders(RenderInterface *rhi, RenderDevice *device, const RenderMultisampling &multisampling);

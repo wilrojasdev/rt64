@@ -6,6 +6,13 @@
 
 #include <algorithm>
 
+// Phase 12 diagnostic: trace setupColor + clearColorTarget to see if VI's
+// target is being recreated or wiped between raster writes and VI sampling.
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <atomic>
+#endif
+
 #include "gbi/rt64_f3d.h"
 #include "shared/rt64_fb_common.h"
 #include "shared/rt64_render_target_copy.h"
@@ -96,6 +103,28 @@ namespace RT64 {
             resolvedTextureView = resolvedTexture->createTextureView(RenderTextureViewDesc::Texture2D(format));
             resolvedTexture->setName("Render Target Color Resolved #" + std::to_string(addressForName));
         }
+
+        // Phase 12: VkImage memory starts UNDEFINED. On Mali Valhall G57 the
+        // first shader sample of an unwritten texel reads ~1.0 in every
+        // channel, so the VI pass that samples this target produces a
+        // uniform white frame for any game whose first display list doesn't
+        // fully cover the screen. Mark the target as needing an initial
+        // clear; the next render-pass-bound clear / draw on this target will
+        // honor it (we can't issue commands here — setupColor runs outside
+        // command-list recording).
+        needsInitialClear = true;
+
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_setupLogged{0};
+            if (s_setupLogged.fetch_add(1) < 30) {
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "setupColor: addr=0x%08x w=%u h=%u tex=%p rev=%u",
+                    addressForName, width, height,
+                    (void*)texture.get(), textureRevision);
+            }
+        }
+#       endif
     }
 
     void RenderTarget::setupDepth(RenderWorker *worker, uint32_t width, uint32_t height) {
@@ -114,6 +143,10 @@ namespace RT64 {
         textureView = texture->createTextureView(RenderTextureViewDesc::Texture2D(format));
         texture->setName("Render Target Depth #" + std::to_string(addressForName));
         textureRevision++;
+
+        // See setupColor() for why we defer the clear instead of issuing it
+        // here: setupDepth runs outside command-list recording.
+        needsInitialClear = true;
     }
 
     void RenderTarget::setupDummy(RenderWorker *worker) {
@@ -159,6 +192,9 @@ namespace RT64 {
         assert(worker != nullptr);
         assert(src != nullptr);
         assert(format != src->format);
+
+        // Phase 12: ensure the source texture is defined before reading it.
+        src->drainInitialClear(worker);
 
         // Select shader based on the formats.
         RenderTextureLayout requiredTextureLayout = RenderTextureLayout::UNKNOWN;
@@ -217,6 +253,9 @@ namespace RT64 {
     void RenderTarget::resolveFromTarget(RenderWorker *worker, RenderTarget *src, const ShaderLibrary *shaderLibrary) {
         assert(!usesResolve() && "The target must not be an MSAA target to allow resolving from other targets.");
 
+        // Same as copyFromTarget: ensure the source is defined before the resolve pass reads it.
+        src->drainInitialClear(worker);
+
         const bool hwResolve = shaderLibrary->usesHardwareResolve && worker->device->getCapabilities().resolveRegion;
         RenderTextureBarrier resolveBarriers[] = {
             RenderTextureBarrier(src->texture.get(), hwResolve ? RenderTextureLayout::RESOLVE_SOURCE : RenderTextureLayout::SHADER_READ),
@@ -243,9 +282,19 @@ namespace RT64 {
         downsampleMultiplier = src->downsampleMultiplier;
         misalignX = src->misalignX;
         invMisalignX = src->invMisalignX;
+
+        // setupColor()/resize() leave new textures with needsInitialClear; the resolve pass defines
+        // every pixel we draw. If this stays true, PresentQueue clears the target before VI and
+        // destroys the copy (or leaves Mali reading stale UNDEFINED ~1.0 depending on ordering).
+        needsInitialClear = false;
     }
 
     void RenderTarget::copyFromChanges(RenderWorker *worker, const FramebufferChange &fbChange, uint32_t fbWidth, uint32_t fbHeight, uint32_t rowStart, const ShaderLibrary *shaderLibrary) {
+        // Phase 12: ensure unwritten pixels are zero, not undefined. The
+        // change-copy shader only writes pixels that actually changed; the
+        // rest of the destination texture must already be defined.
+        drainInitialClear(worker);
+
         assert(worker != nullptr);
         assert(fbChange.used);
 
@@ -322,14 +371,41 @@ namespace RT64 {
         markForResolve();
     }
 
+    void RenderTarget::drainInitialClear(RenderWorker *worker) {
+        if (!needsInitialClear) {
+            return;
+        }
+        if (type == Framebuffer::Type::Depth) {
+            clearDepthTarget(worker);
+        }
+        else {
+            clearColorTarget(worker);
+        }
+    }
+
     void RenderTarget::clearColorTarget(RenderWorker *worker) {
         assert(worker != nullptr);
+
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_clearLogged{0};
+            if (s_clearLogged.fetch_add(1) < 50) {
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "clearColor: addr=0x%08x tex=%p needed=%d rev=%u",
+                    addressForName, (void*)texture.get(),
+                    needsInitialClear ? 1 : 0, textureRevision);
+            }
+        }
+#       endif
 
         setupColorFramebuffer(worker);
 
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(texture.get(), RenderTextureLayout::COLOR_WRITE));
         worker->commandList->setFramebuffer(textureFramebuffer.get());
         worker->commandList->clearColor();
+
+        // Texture is now defined (zeroed); the deferred-init flag is consumed.
+        needsInitialClear = false;
 
         markForResolve();
     }
@@ -347,7 +423,9 @@ namespace RT64 {
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, clearBarriers, uint32_t(std::size(clearBarriers)));
         worker->commandList->setFramebuffer(textureFramebuffer.get());
         worker->commandList->clearDepth();
-        
+
+        needsInitialClear = false;
+
         markForResolve();
     }
 
@@ -408,7 +486,17 @@ namespace RT64 {
     }
 
     void RenderTarget::resolveTarget(RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
-        if (!resolvedTextureDirty || !usesResolve()) {
+        // Phase 12: even when there's no MSAA resolve to perform, the next
+        // operation on this target (typically VI sampling) needs the texture
+        // to have defined contents. Drain the deferred clear here.
+        drainInitialClear(worker);
+
+        // VI and other readers use getResolvedTexture(), which for MSAA targets is this separate
+        // single-sample image — not the multisampled attachment the raster wrote to.
+        // Skipping the copy when resolvedTextureDirty is false is unsafe: the flag can be wrong
+        // after certain ordering (or never set), leaving resolved memory UNDEFINED; Mali Valhall G57
+        // then samples ~1.0 in every channel (uniform white) while the MSAA surface holds the scene.
+        if (!usesResolve()) {
             return;
         }
 
@@ -506,7 +594,12 @@ namespace RT64 {
     }
 
     RenderFormat RenderTarget::colorBufferFormat(bool usesHDR) {
-        return usesHDR ? RenderFormat::R16G16B16A16_UNORM : RenderFormat::R8G8B8A8_UNORM;
+        // Phase 12: HDR uses R16G16B16A16_FLOAT (not _UNORM) so devices like
+        // Mali Valhall G57 can sample it with VK_FILTER_LINEAR. _UNORM doesn't
+        // expose VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT on Mali,
+        // which made every linear-filtered post-process pass produce undefined
+        // samples and a uniform white frame.
+        return usesHDR ? RenderFormat::R16G16B16A16_FLOAT : RenderFormat::R8G8B8A8_UNORM;
     }
 
     RenderFormat RenderTarget::depthBufferFormat() {

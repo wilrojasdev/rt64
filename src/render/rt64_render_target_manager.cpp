@@ -6,6 +6,13 @@
 
 #include "xxHash/xxh3.h"
 
+// Phase 12 diagnostic: trace targetMap mutations to find what destroys RenderTarget
+// instances (causing setupColor to fire repeatedly with rev=1 on the same key).
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <atomic>
+#endif
+
 namespace RT64 {
     // RenderTargetKey
 
@@ -51,10 +58,31 @@ namespace RT64 {
         }
 
         target = std::make_unique<RenderTarget>(key.address, key.fbType, multisampling, usesHDR);
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_newTargetLogged{0};
+            if (s_newTargetLogged.fetch_add(1) < 40) {
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "TM.NEW: mgr=%p addr=0x%08x w=%u siz=%u fbType=%d mapSize=%zu",
+                    (void*)this, key.address, key.width, key.siz, (int)key.fbType,
+                    targetMap.size());
+            }
+        }
+#       endif
         return *target;
     }
-    
+
     void RenderTargetManager::destroyAll() {
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_destroyLogged{0};
+            if (s_destroyLogged.fetch_add(1) < 20) {
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "TM.DESTROYALL: mgr=%p erasing %zu entries",
+                    (void*)this, targetMap.size());
+            }
+        }
+#       endif
         targetMap.clear();
     }
 

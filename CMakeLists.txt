@@ -195,10 +195,46 @@ set (DXC_CS_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_3")
 set (DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_3")
 set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
 
+# RasterPS bring-up: pass -D RT64_DIAG_RASTER_PS_MODE=N to DXC (see RasterPS.hlsl).
+set(RT64_DIAG_RASTER_PS_MODE "0" CACHE STRING "RasterPS: 0=normal, 1=solid magenta, 2=visualize RenderParams low bytes (omL/omH/flags)")
+set(RT64_RASTER_PS_EXTRA_DXC "")
+if(NOT RT64_DIAG_RASTER_PS_MODE STREQUAL "0")
+    list(APPEND RT64_RASTER_PS_EXTRA_DXC "-D" "RT64_DIAG_RASTER_PS_MODE=${RT64_DIAG_RASTER_PS_MODE}")
+endif()
+
+# VideoInterface PS bring-up modes (see VideoInterfacePS.hlsl).
+set(RT64_DIAG_VI_MODE "0" CACHE STRING "VideoInterfacePS: 0=normal, 1=solid cyan, 2=raw gInput sample (no AA/gamma), 3=UV grid, 4=sample classifier (red=saturated, green=zero, blue=real)")
+set(RT64_VI_EXTRA_DXC "")
+if(NOT RT64_DIAG_VI_MODE STREQUAL "0")
+    list(APPEND RT64_VI_EXTRA_DXC "-D" "RT64_DIAG_VI_MODE=${RT64_DIAG_VI_MODE}")
+endif()
+
 function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
-    add_custom_command(OUTPUT ${OUTNAME}.spv
-        COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
-        DEPENDS ${FILENAME})
+    # Sentinel arg: when "--strip-image-format-unknown" appears in the args,
+    # filter it out before invoking DXC and append a post-process step that
+    # rewrites every OpTypeImage Format operand in the .spv to Unknown.
+    # Required because DXC 1.7 silently ignores [[vk::image_format("unknown")]],
+    # which breaks format-agnostic framebuffer-manipulation compute shaders on
+    # strict-aliasing Vulkan drivers (Mali Valhall G57).
+    set(_dxc_args ${ARGN})
+    set(_strip_image_format FALSE)
+    if (_dxc_args)
+        list(FIND _dxc_args "--strip-image-format-unknown" _strip_idx)
+        if (_strip_idx GREATER -1)
+            list(REMOVE_AT _dxc_args ${_strip_idx})
+            set(_strip_image_format TRUE)
+        endif()
+    endif()
+    if (_strip_image_format)
+        add_custom_command(OUTPUT ${OUTNAME}.spv
+            COMMAND ${DXC} ${DXC_SPV_OPTS} ${_dxc_args} ${FILENAME} /Fo ${OUTNAME}.spv
+            COMMAND ${CMAKE_COMMAND} -E env python3 ${PROJECT_SOURCE_DIR}/scripts/spv_strip_image_format.py ${OUTNAME}.spv
+            DEPENDS ${FILENAME} ${PROJECT_SOURCE_DIR}/scripts/spv_strip_image_format.py)
+    else()
+        add_custom_command(OUTPUT ${OUTNAME}.spv
+            COMMAND ${DXC} ${DXC_SPV_OPTS} ${_dxc_args} ${FILENAME} /Fo ${OUTNAME}.spv
+            DEPENDS ${FILENAME})
+    endif()
     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
         COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
         DEPENDS ${OUTNAME}.spv file_to_c
@@ -594,24 +630,24 @@ if (${WIN32})
     build_library_shader(rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSLibrary.hlsl")
 endif()
 
-build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
-build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING")
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
-build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING")
+build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" ${RT64_RASTER_PS_EXTRA_DXC})
+build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" ${RT64_RASTER_PS_EXTRA_DXC})
 build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
 build_compute_shader(rt64 "src/shaders/FbChangesClearCS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/FbChangesDrawColorPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/FbChangesDrawDepthPS.hlsl")
-build_compute_shader(rt64 "src/shaders/FbReadAnyChangesCS.hlsl" "src/shaders/FbReadAnyChangesCS.hlsl" "-O0")
+build_compute_shader(rt64 "src/shaders/FbReadAnyChangesCS.hlsl" "src/shaders/FbReadAnyChangesCS.hlsl" "-O0" "--strip-image-format-unknown")
 build_compute_shader(rt64 "src/shaders/FbReinterpretCS.hlsl" "src/shaders/FbReinterpretCS.hlsl" "-O0")
-build_compute_shader(rt64 "src/shaders/FbReadAnyFullCS.hlsl" "src/shaders/FbReadAnyFullCS.hlsl" "-O0")
-build_compute_shader(rt64 "src/shaders/FbWriteColorCS.hlsl" "src/shaders/FbWriteColorCS.hlsl" "-O0")
-build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl")
-build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl" "src/shaders/FbWriteDepthCSMS.hlsl" "-D MULTISAMPLING")
+build_compute_shader(rt64 "src/shaders/FbReadAnyFullCS.hlsl" "src/shaders/FbReadAnyFullCS.hlsl" "-O0" "--strip-image-format-unknown")
+build_compute_shader(rt64 "src/shaders/FbWriteColorCS.hlsl" "src/shaders/FbWriteColorCS.hlsl" "-O0" "--strip-image-format-unknown")
+build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl" "src/shaders/FbWriteDepthCS.hlsl" "--strip-image-format-unknown")
+build_compute_shader(rt64 "src/shaders/FbWriteDepthCS.hlsl" "src/shaders/FbWriteDepthCSMS.hlsl" "-D MULTISAMPLING" "--strip-image-format-unknown")
 build_compute_shader(rt64 "src/shaders/GaussianFilterRGB3x3CS.hlsl")
 build_compute_shader(rt64 "src/shaders/BoxFilterCS.hlsl")
 build_compute_shader(rt64 "src/shaders/BicubicScalingCS.hlsl")
@@ -642,8 +678,8 @@ build_compute_shader(rt64 "src/shaders/TextureDecodeCS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/TextureResolveSamples2XPS.hlsl" "-D SAMPLES_2X")
 build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/TextureResolveSamples4XPS.hlsl" "-D SAMPLES_4X")
 build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/TextureResolveSamples8XPS.hlsl" "-D SAMPLES_8X")
-build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSRegular.hlsl")
-build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
+build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSRegular.hlsl" ${RT64_VI_EXTRA_DXC})
+build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING" ${RT64_VI_EXTRA_DXC})
 build_vertex_shader( rt64 "src/shaders/FullScreenVS.hlsl")
 build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl")

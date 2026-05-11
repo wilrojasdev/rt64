@@ -176,9 +176,10 @@
 namespace RT64 {
     // ShaderLibrary
 
-    ShaderLibrary::ShaderLibrary(bool usesHDR, bool usesHardwareResolve) {
+    ShaderLibrary::ShaderLibrary(bool usesHDR, bool usesHardwareResolve, RenderFormat swapChainFormat) {
         this->usesHDR = usesHDR;
         this->usesHardwareResolve = usesHardwareResolve;
+        this->swapChainFormat = swapChainFormat;
     }
 
     ShaderLibrary::~ShaderLibrary() { }
@@ -293,8 +294,21 @@ namespace RT64 {
             std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(ComposePSBlobDXIL, ComposePSBlobSPIRV, ComposePSBlobMSL, "PSMain", shaderFormat));
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.pipelineLayout = compose.pipelineLayout.get();
-            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
-            pipelineDesc.renderTargetFormat[0] = RenderFormat::R32G32B32A32_FLOAT;
+            // AlphaBlend mixes source.a (the N64 coverage value written by the
+            // raster path) as a translucency factor against the destination.
+            // Without dualSrcBlend (Mali Valhall G57 on Samsung A24) the raster
+            // path can't separate coverage from a real blend factor, and low-
+            // coverage pixels here read through to the destination — uniform
+            // white on Mali because the compose target's prior contents are
+            // undefined. Fall back to a straight copy on those drivers so
+            // every N64 pixel arrives at the compose target as the rasterizer
+            // produced it. Desktop drivers still get the original blend.
+            if (device->getCapabilities().dualSourceBlend) {
+                pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            } else {
+                pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            }
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
             pipelineDesc.renderTargetCount = 1;
             pipelineDesc.vertexShader = fullScreenVertexShader.get();
             pipelineDesc.pixelShader = pixelShader.get();
@@ -599,7 +613,7 @@ namespace RT64 {
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.vertexShader = fullScreenVertexShader.get();
             pipelineDesc.pixelShader = regularShader.get();
-            pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // TODO: Use whatever format the swap chain was created with.
+            pipelineDesc.renderTargetFormat[0] = swapChainFormat;
             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             pipelineDesc.renderTargetCount = 1;
             pipelineDesc.pipelineLayout = videoInterfaceNearest.pipelineLayout.get();
@@ -843,7 +857,15 @@ namespace RT64 {
             std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(PostProcessPSBlobDXIL, PostProcessPSBlobSPIRV, PostProcessPSBlobMSL, "PSMain", shaderFormat));
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.pipelineLayout = postProcess.pipelineLayout.get();
-            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            // See compose pipeline above for the rationale: without dualSrcBlend
+            // the source alpha at this pass is the N64 coverage value and using
+            // it as a blend factor reads the destination through, producing a
+            // white frame on Mali Valhall G57.
+            if (device->getCapabilities().dualSourceBlend) {
+                pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            } else {
+                pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            }
             pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
             pipelineDesc.renderTargetCount = 1;
             pipelineDesc.vertexShader = fullScreenVertexShader.get();

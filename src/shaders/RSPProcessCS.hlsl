@@ -19,18 +19,23 @@ struct RSPProcessCB {
 };
 
 [[vk::push_constant]] ConstantBuffer<RSPProcessCB> gConstants : register(b0);
-Buffer<float> srcPos : register(t1);
-Buffer<float> srcVel : register(t2);
-Buffer<float> srcTc : register(t3);
-Buffer<float> srcTcVel : register(t4);
-Buffer<uint> srcCol : register(t5);
-Buffer<int> srcNorm : register(t6);
-Buffer<uint> srcViewProjIndices : register(t7);
-Buffer<uint> srcWorldIndices : register(t8);
-Buffer<uint> srcFogIndices : register(t9);
-Buffer<uint> srcLightIndices : register(t10);
-Buffer<uint> srcLightCounts : register(t11);
-Buffer<uint> srcLookAtIndices : register(t12);
+// Phase 12: explicit SPIR-V image format annotations match the runtime
+// VkBufferView formats (see rt64_workload.cpp uploadDrawData). Strict
+// drivers like Mali Valhall G57 treat Buffer<T> Format mismatches as
+// "undefined values to the WHOLE image" — without these, every vertex
+// transform produces garbage and the entire screen renders white.
+[[vk::image_format("r32f")]]  Buffer<float> srcPos : register(t1);
+[[vk::image_format("r32f")]]  Buffer<float> srcVel : register(t2);
+[[vk::image_format("r32f")]]  Buffer<float> srcTc : register(t3);
+[[vk::image_format("r32f")]]  Buffer<float> srcTcVel : register(t4);
+[[vk::image_format("r8ui")]]  Buffer<uint>  srcCol : register(t5);
+[[vk::image_format("r8i")]]   Buffer<int>   srcNorm : register(t6);
+[[vk::image_format("r16ui")]] Buffer<uint>  srcViewProjIndices : register(t7);
+[[vk::image_format("r16ui")]] Buffer<uint>  srcWorldIndices : register(t8);
+[[vk::image_format("r16ui")]] Buffer<uint>  srcFogIndices : register(t9);
+[[vk::image_format("r16ui")]] Buffer<uint>  srcLightIndices : register(t10);
+[[vk::image_format("r8ui")]]  Buffer<uint>  srcLightCounts : register(t11);
+[[vk::image_format("r16ui")]] Buffer<uint>  srcLookAtIndices : register(t12);
 StructuredBuffer<RSPViewport> rspViewportVector : register(t13);
 StructuredBuffer<RSPFog> rspFogVector : register(t14);
 StructuredBuffer<RSPLight> rspLightVector : register(t15);

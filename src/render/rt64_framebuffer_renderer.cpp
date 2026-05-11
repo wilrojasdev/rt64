@@ -6,6 +6,13 @@
 
 #include "../include/rt64_extended_gbi.h"
 
+// Phase 12 diagnostic: log every recordFramebuffer to see which RenderTarget
+// instance actually receives the raster draws.
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <atomic>
+#endif
+
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
 #include "hle/rt64_color_converter.h"
@@ -474,6 +481,18 @@ namespace RT64 {
         RenderDescriptorSet *descRealFbSet = framebuffer.descRealFbSet->get();
         RenderDescriptorSet *descDummyFbSet = framebuffer.descDummyFbSet->get();
 
+#       ifdef __ANDROID__
+        // Phase 12 diagnostic: count actual draws issued vs scissor-skips per scene.
+        uint32_t s_drawsIssued = 0;
+        uint32_t s_scissorSkips = 0;
+        uint32_t s_fillRects = 0;
+        // Track first FillRect index (if any) inside this scene so we can tell
+        // whether fills come before draws (correct) or after (wipes draws).
+        int32_t s_firstFillIdx = -1;
+        int32_t s_lastDrawIdx = -1;
+        int32_t s_currentInstanceIdx = -1;
+#       endif
+
         auto switchToGraphicsPipeline = [&]() {
             previousCallType = InstanceDrawCall::Type::Unknown;
             previousVertexTestZ = false;
@@ -506,14 +525,23 @@ namespace RT64 {
             else {
                 worker->commandList->drawInstanced(drawCall.triangles.faceCount * 3, 1, drawCall.triangles.indexStart, 0);
             }
+#           ifdef __ANDROID__
+            s_drawsIssued++;
+            s_lastDrawIdx = s_currentInstanceIdx;
+#           endif
         };
 
         if (fbStorage->colorTarget != nullptr) {
             switchToGraphicsPipeline();
         }
         
+        int32_t s_iterIdx = -1;
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
+#           ifdef __ANDROID__
+            s_iterIdx++;
+            s_currentInstanceIdx = s_iterIdx;
+#           endif
             switch (drawCall.type) {
             case InstanceDrawCall::Type::IndexedTriangles: 
             case InstanceDrawCall::Type::RawTriangles:
@@ -547,6 +575,9 @@ namespace RT64 {
 
                 // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
                 if (triangles.scissor.isEmpty()) {
+#                   ifdef __ANDROID__
+                    s_scissorSkips++;
+#                   endif
                     continue;
                 }
 
@@ -608,6 +639,12 @@ namespace RT64 {
                 else {
                     worker->commandList->clearDepth(true, clearRect.depth, clearRects, clearRectCount);
                 }
+#               ifdef __ANDROID__
+                s_fillRects++;
+                if (s_firstFillIdx < 0) {
+                    s_firstFillIdx = s_currentInstanceIdx;
+                }
+#               endif
 
                 break;
             };
@@ -637,6 +674,21 @@ namespace RT64 {
                 break;
             }
         }
+
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_sceneLogged{0};
+            if (s_sceneLogged.fetch_add(1) < 30) {
+                const uint32_t addr = (fbStorage->colorTarget != nullptr) ? fbStorage->colorTarget->addressForName : 0;
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "SCENE: this=%p addr=0x%08x instances=%zu draws=%u skipped=%u "
+                    "fills=%u firstFillIdx=%d lastDrawIdx=%d",
+                    (void*)this, addr, rasterScene.instanceIndices.size(),
+                    s_drawsIssued, s_scissorSkips, s_fillRects,
+                    s_firstFillIdx, s_lastDrawIdx);
+            }
+        }
+#       endif
 
         // Mark targets for resolve.
         if (fbStorage->colorTarget != nullptr) {
@@ -1245,8 +1297,34 @@ namespace RT64 {
             startBarriers.emplace_back(RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
         }
 
+#       ifdef __ANDROID__
+        {
+            static std::atomic<int> s_recFbLogged{0};
+            if (s_recFbLogged.fetch_add(1) < 30) {
+                const uint32_t addr = (colorTarget != nullptr) ? colorTarget->addressForName : 0;
+                const void* tex = (colorTarget != nullptr) ? (void*)colorTarget->texture.get() : nullptr;
+                __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                    "RECFB: this=%p addr=0x%08x tex=%p scenes=%zu rasters=%zu",
+                    (void*)this, addr, tex,
+                    targetDrawCall.sceneIndices.size(),
+                    targetDrawCall.rasterScenes.size());
+            }
+        }
+#       endif
+
         startBarriers.emplace_back(RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, startBarriers);
+
+        // Phase 12: drain any deferred initial clears now that we're inside
+        // a recording command list. Strict drivers (Mali Valhall G57) read
+        // UNDEFINED VkImage memory back as ~1.0 in every channel.
+        if (colorTarget != nullptr && colorTarget->needsInitialClear) {
+            colorTarget->clearColorTarget(worker);
+        }
+        if (depthTarget->needsInitialClear) {
+            depthTarget->clearDepthTarget(worker);
+        }
+
 
         bool depthState = false;
         worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorDepthWrite.get());
@@ -1607,7 +1685,19 @@ namespace RT64 {
                     {
                         triangles.shaderDesc = call.shaderDesc;
 
+                        // Phase 12 (Mali Valhall G57): the SPEC_CONSTANT per-state pixel
+                        // shader pipelines silently produce no fragments on Mali, so the
+                        // canonical color target stays at its per-frame clear color and
+                        // VI samples a black/empty image. Force every fragment through
+                        // the DYNAMIC ubershader path on Android until the underlying
+                        // Mali/respv interaction is understood. The ubershader rendered
+                        // correctly when verified with diag mode 1 (constant-color
+                        // raster shader).
+#                       ifdef __ANDROID__
+                        RasterShader *gpuShader = nullptr;
+#                       else
                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
+#                       endif
                         if (gpuShader != nullptr) {
                             triangles.pipeline = gpuShader->pipeline.get();
                         }

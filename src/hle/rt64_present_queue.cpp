@@ -9,6 +9,15 @@
 
 #include "rt64_workload_queue.h"
 
+#include <vector>
+
+// Phase 12 diagnostic: dump VI's target lookup vs the addresses the rasterizer
+// actually drew into. Remove the block + include once the bug is identified.
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <atomic>
+#endif
+
 namespace RT64 {
     // PresentQueue
 
@@ -194,13 +203,98 @@ namespace RT64 {
                     ext.sharedResources->workloadMutex.lock();
                 }
 
-                RenderTargetKey colorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, Framebuffer::Type::Color);
-                colorTarget = &targetManager.get(colorTargetKey, true);
+                // Interpolation writes via resolveFromTarget into interpolatedColorTargets; the
+                // canonical color target keeps the raster result for this key (see WorkloadQueue).
+                //
+                // RenderTargetKey must match WorkloadQueue::getTargetsFromPair (fbManager.get after draws).
+                // If VI fbAddress() names a different RDRAM base than the color image the raster wrote,
+                // hashing presentFb alone points at a never-rendered VkImage (Mali reads UNDEFINED ~1.0).
+                // Snapshot addresses under managerMutex — the workload thread mutates the vector there.
+                std::vector<uint32_t> snapshotColorAddrs;
+                {
+                    std::scoped_lock<std::mutex> managerLock(ext.sharedResources->managerMutex);
+                    snapshotColorAddrs = ext.sharedResources->allDrawnColorAddressVector;
+                    if (snapshotColorAddrs.empty()) {
+                        snapshotColorAddrs = ext.sharedResources->colorImageAddressVector;
+                    }
+                }
+
+                // Prefer the Framebuffer whose address matches presentFb; if the raster never touched
+                // that RDRAM base this frame, fall back to the most recently drawn color (first in snapshot).
+                Framebuffer *rtKeyFb = presentFb;
+                if (!present.debuggerFramebuffer.view && !snapshotColorAddrs.empty()) {
+                    const uint32_t keyAddr = presentFb->addressStart;
+                    Framebuffer *firstDrawn = nullptr;
+                    Framebuffer *matchingKey = nullptr;
+                    for (uint32_t colorAddress : snapshotColorAddrs) {
+                        Framebuffer *cfb = fbManager.find(colorAddress);
+                        if (cfb == nullptr) {
+                            continue;
+                        }
+                        if (firstDrawn == nullptr) {
+                            firstDrawn = cfb;
+                        }
+                        if (cfb->addressStart == keyAddr) {
+                            matchingKey = cfb;
+                            break;
+                        }
+                    }
+                    if (matchingKey != nullptr) {
+                        rtKeyFb = matchingKey;
+                    } else if (firstDrawn != nullptr && (presentFb == viFb)) {
+                        rtKeyFb = firstDrawn;
+                    }
+                }
+
+                RenderTargetKey colorTargetKey(rtKeyFb->addressStart, rtKeyFb->width, rtKeyFb->siz, Framebuffer::Type::Color);
+                colorTarget = &targetManager.get(colorTargetKey, false);
+
+#               ifdef __ANDROID__
+                {
+                    static std::atomic<int> s_viLookupLogged{0};
+                    if (s_viLookupLogged.fetch_add(1) < 10) {
+                        // Build a string of every drawn FB with its live dims so we can
+                        // see whether the (addr, width, siz) keys collide with VI's lookup.
+                        char drawnBuf[512];
+                        int off = 0;
+                        if (snapshotColorAddrs.empty()) {
+                            snprintf(drawnBuf, sizeof(drawnBuf), "(none)");
+                        } else {
+                            for (size_t i = 0; i < snapshotColorAddrs.size() && off < (int)sizeof(drawnBuf) - 64; i++) {
+                                Framebuffer *cfb = fbManager.find(snapshotColorAddrs[i]);
+                                if (cfb != nullptr) {
+                                    off += snprintf(drawnBuf + off, sizeof(drawnBuf) - off,
+                                                    "%s0x%08x(w=%u,siz=%u)",
+                                                    (i == 0) ? "" : ",",
+                                                    cfb->addressStart, cfb->width, cfb->siz);
+                                } else {
+                                    off += snprintf(drawnBuf + off, sizeof(drawnBuf) - off,
+                                                    "%s0x%08x(NOFB)",
+                                                    (i == 0) ? "" : ",",
+                                                    snapshotColorAddrs[i]);
+                                }
+                            }
+                        }
+                        const uint32_t viFbAddr = (viFb != nullptr) ? viFb->addressStart : 0;
+                        const uint32_t viReqAddr = present.screenVI.fbAddress();
+                        __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                            "VIlookup: VIreq=0x%08x viFb=0x%08x presentFb=0x%08x(w=%u,siz=%u) "
+                            "rtKeyFb=0x%08x(w=%u,siz=%u) empty=%d drawn=[%s]",
+                            viReqAddr,
+                            viFbAddr,
+                            presentFb->addressStart, presentFb->width, presentFb->siz,
+                            rtKeyFb->addressStart, rtKeyFb->width, rtKeyFb->siz,
+                            colorTarget->isEmpty() ? 1 : 0,
+                            drawnBuf);
+                    }
+                }
+#               endif
+
                 if (!colorTarget->isEmpty()) {
                     // If a depth framebuffer is about to be shown, convert it to color.
                     if (presentFb->isLastWriteDifferent(Framebuffer::Type::Color)) {
                         RenderTargetKey otherColorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, presentFb->lastWriteType);
-                        RenderTarget &otherColorTarget = targetManager.get(otherColorTargetKey, true);
+                        RenderTarget &otherColorTarget = targetManager.get(otherColorTargetKey, false);
                         if (!otherColorTarget.isEmpty()) {
                             const FixedRect &r = presentFb->lastWriteRect;
                             RenderWorkerExecution workerExecution(ext.presentGraphicsWorker);
@@ -230,7 +324,7 @@ namespace RT64 {
                 ext.sharedResources->workloadMutex.lock();
 
                 RenderTargetKey colorTargetKey(fbAddress, scratchFb.width, scratchFb.siz, Framebuffer::Type::Color);
-                colorTarget = &targetManager.get(colorTargetKey, true);
+                colorTarget = &targetManager.get(colorTargetKey, false);
                 colorTarget->resize(ext.presentGraphicsWorker, scratchFb.width, scratchFb.height);
                 colorTarget->resolutionScale = { 1.0f, 1.0f };
                 colorTarget->downsampleMultiplier = 1;
@@ -313,6 +407,14 @@ namespace RT64 {
                 
                 VIRenderer::RenderParams renderParams;
                 if (colorTarget != nullptr) {
+                    // Phase 12: drain any deferred initial clear before any
+                    // pass reads from this target. Plume's clear-at-creation
+                    // path covers most cases now; this keeps the safety net
+                    // for the few hot paths that bypass it.
+                    if (colorTarget->needsInitialClear) {
+                        colorTarget->clearColorTarget(ext.presentGraphicsWorker);
+                    }
+
                     renderParams.device = ext.device;
                     renderParams.commandList = commandList;
                     renderParams.swapChain = ext.swapChain;
@@ -344,6 +446,20 @@ namespace RT64 {
                 commandList->clearColor();
 
                 if (renderParams.texture != nullptr) {
+#                   ifdef __ANDROID__
+                    {
+                        static std::atomic<int> s_viBindLogged{0};
+                        if (s_viBindLogged.fetch_add(1) < 10) {
+                            const uint32_t ctAddr = (colorTarget != nullptr) ? colorTarget->addressForName : 0;
+                            const uint32_t ctRev = (colorTarget != nullptr) ? colorTarget->textureRevision : 0;
+                            const void* mainTex = (colorTarget != nullptr) ? (void*)colorTarget->texture.get() : nullptr;
+                            __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                                "VIbind: addr=0x%08x mainTex=%p sampledTex=%p rev=%u w=%u h=%u",
+                                ctAddr, mainTex, (void*)renderParams.texture, ctRev,
+                                renderParams.textureWidth, renderParams.textureHeight);
+                        }
+                    }
+#                   endif
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
                     viRenderer->render(renderParams);
                 }

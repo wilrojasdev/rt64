@@ -80,7 +80,16 @@ namespace RT64 {
         std::mutex threadMutex;
         std::atomic<bool> threadsRunning = false;
         std::atomic<bool> rtEnabled = false;
+        // Phase 12 (Mali Valhall G57): force the renderer to always use the
+        // DYNAMIC ubershader. The per-state SPEC_CONSTANT pixel shader pipelines
+        // silently no-op on Mali — fragments emit no color (texture stays at
+        // the per-frame clear). The DYNAMIC variant renders correctly. Toggle
+        // this back to false on platforms where SPEC_CONSTANT works.
+#ifdef __ANDROID__
+        std::atomic<bool> ubershadersOnly = true;
+#else
         std::atomic<bool> ubershadersOnly = false;
+#endif
         std::atomic<bool> ubershadersVisible = false;
         std::unique_ptr<FramebufferRenderer> framebufferRenderer;
         std::unique_ptr<RenderFramebufferManager> renderFramebufferManager;

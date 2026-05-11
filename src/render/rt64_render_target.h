@@ -46,6 +46,11 @@ namespace RT64 {
         int32_t invMisalignX = 0;
         bool resolvedTextureDirty = false;
         bool usesHDR = false;
+        // True between setupColor()/setupDepth() and the first time the
+        // texture is actually written. Strict drivers (Mali Valhall G57) leave
+        // VkImage memory at ~1.0 in every channel until written, so we issue
+        // a one-shot clear when the next render-pass-bound operation runs.
+        bool needsInitialClear = false;
 
         RenderTarget(uint32_t addressForName, Framebuffer::Type type, const RenderMultisampling &multisampling, bool usesHDR);
         ~RenderTarget();
@@ -62,6 +67,11 @@ namespace RT64 {
         void copyFromChanges(RenderWorker *worker, const FramebufferChange &fbChange, uint32_t fbWidth, uint32_t fbHeight, uint32_t rowStart, const ShaderLibrary *shaderLibrary);
         void clearColorTarget(RenderWorker *worker);
         void clearDepthTarget(RenderWorker *worker);
+        // Phase 12: drains the deferred initial clear set by setupColor /
+        // setupDepth. No-op once consumed. Call before any pass that reads
+        // from this target's texture so strict drivers (Mali Valhall G57)
+        // don't return ~1.0 from VkImage memory that's still UNDEFINED.
+        void drainInitialClear(RenderWorker *worker);
         void downsampleTarget(RenderWorker *worker, const ShaderLibrary *shaderLibrary);
         void resolveTarget(RenderWorker *worker, const ShaderLibrary *shaderLibrary);
         void recordRasterResolve(RenderWorker *worker, const TextureCopyDescriptorSet *srcDescriptorSet, uint32_t x, uint32_t y, uint32_t width, uint32_t height, const ShaderLibrary *shaderLibrary);

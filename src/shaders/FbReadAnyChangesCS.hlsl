@@ -16,7 +16,11 @@ RWStructuredBuffer<uint> gOutputCount : register(u3, space0);
 // doesn't pin a specific format and the runtime can alias safely.
 // Requires shaderStorageImage{Read,Write}WithoutFormat in the device.
 [[vk::image_format("unknown")]] RWTexture2D<float4> gOutputChangeColor : register(u0, space1);
-[[vk::image_format("unknown")]] RWTexture2D<float>  gOutputChangeDepth : register(u1, space1);
+// gOutputChangeDepth aliases the same R16G16B16A16_SFLOAT image as
+// gOutputChangeColor in rt64; declare it as float4 (with depth replicated
+// across channels) so the OpImageWrite texel matches the 4-component view —
+// otherwise strict drivers reject the dispatch.
+[[vk::image_format("unknown")]] RWTexture2D<float4> gOutputChangeDepth : register(u1, space1);
 [[vk::image_format("unknown")]] RWTexture2D<uint>   gOutputChangeBoolean : register(u2, space1);
 
 [numthreads(FB_COMMON_WORKGROUP_SIZE, FB_COMMON_WORKGROUP_SIZE, 1)]
@@ -28,7 +32,7 @@ void CSMain(uint2 coord : SV_DispatchThreadID) {
             const uint swappedUint = EndianSwapUINT(gNewInput[bufferIndex], gConstants.siz);
             if (gConstants.fmt == G_IM_FMT_DEPTH) {
                 const float newDepth = Depth16ToFloat(swappedUint);
-                gOutputChangeDepth[pixelCoord] = newDepth;
+                gOutputChangeDepth[pixelCoord] = float4(newDepth, newDepth, newDepth, newDepth);
             }
             else {
                 const float4 newColor = UINTToFloat4(swappedUint, gConstants.siz, gConstants.fmt);

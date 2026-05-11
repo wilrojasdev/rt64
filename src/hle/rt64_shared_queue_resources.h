@@ -51,6 +51,10 @@ namespace RT64 {
         uint32_t viOriginalRate = 0;
         std::vector<uint32_t> colorImageAddressVector;
         std::unordered_set<uint32_t> colorImageAddressSet;
+        // Every color image address that received a draw this workload (reverse pair order, deduped).
+        // Used by PresentQueue to match RenderTargetKey to the raster — colorImageAddressVector omits
+        // pairs that fail earlyPresentCandidate(), which can miss the buffer that was actually rendered.
+        std::vector<uint32_t> allDrawnColorAddressVector;
         std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
         InterpolatedFrameCounters interpolatedFrames[2];
         uint32_t interpolatedFramesIndex = 0;

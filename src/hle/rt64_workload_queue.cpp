@@ -10,6 +10,13 @@
 
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
+// Phase 12 diagnostic: confirm MSAA state and interpolation gate decision on Mali.
+// Remove the includes + the one-shot ALOG block once the bug is identified.
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <atomic>
+#endif
+
 namespace RT64 {
     // WorkloadQueue
 
@@ -365,10 +372,6 @@ namespace RT64 {
         // Reset the max height tracking for all active framebuffers.
         fbManager.resetTracking();
 
-        if ((overrideTarget != nullptr) && !usingMSAA) {
-            targetManager.setOverride(overrideTargetKey, overrideTarget);
-        }
-
         for (uint32_t w = 0; w < curFrame.workloads.size(); w++) {
             Workload &workload = workloads[curFrame.workloads[w]];
 
@@ -450,6 +453,8 @@ namespace RT64 {
                     }
 
                     if (colorFb != nullptr) {
+                        // Hash must match present_queue: use live Framebuffer fields (not colorImg.* alone),
+                        // otherwise width/siz drift → different RenderTarget than VI sampling.
                         fbKey.colorTargetKey = RenderTargetKey(colorFb->addressStart, colorFb->width, colorFb->siz, Framebuffer::Type::Color);
                         colorTarget = &targetManager.get(fbKey.colorTargetKey);
                     }
@@ -805,8 +810,13 @@ namespace RT64 {
                         ext.workloadGraphicsWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(chosenTarget->texture.get(), RenderTextureLayout::SHADER_READ));
                     }
 
-                    // Do the resolve if using MSAA while target override is active and we're on the correct framebuffer pair index.
-                    if (usingMSAA && (overrideTarget != nullptr) && ((uint32_t)overrideTargetFbPairIndex == f)) {
+                    // Frame interpolation: copy the canonical color target into the single-sample
+                    // interpolated target for this VI framebuffer pair.
+                    // With MSAA, draws hit the multisampled canonical; resolve blits to the override.
+                    // With MSAA off we used to redirect draws via setOverride; that skipped this pass and
+                    // motion/interpolation often left most of the override VkImage undefined (Mali ~1.0).
+                    // Always drawing to canonical and resolving here matches the MSAA path.
+                    if ((overrideTarget != nullptr) && ((uint32_t)overrideTargetFbPairIndex == f)) {
                         overrideTarget->resize(ext.workloadGraphicsWorker, colorTarget->width, colorTarget->height);
                         overrideTarget->resolveFromTarget(ext.workloadGraphicsWorker, colorTarget, ext.shaderLibrary);
                     }
@@ -851,10 +861,6 @@ namespace RT64 {
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();
-        }
-
-        if ((overrideTarget != nullptr) && !usingMSAA) {
-            targetManager.removeOverride(overrideTargetKey);
         }
 
         framebufferRenderer->advanceFrame(workloadConfig.raytracingEnabled);
@@ -934,16 +940,23 @@ namespace RT64 {
                     FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
                     std::vector<uint32_t> &colorVector = ext.sharedResources->colorImageAddressVector;
                     std::unordered_set<uint32_t> &colorSet = ext.sharedResources->colorImageAddressSet;
+                    std::vector<uint32_t> &allDrawn = ext.sharedResources->allDrawnColorAddressVector;
                     colorVector.clear();
                     colorSet.clear();
+                    allDrawn.clear();
+                    std::unordered_set<uint32_t> seenDrawnAddr;
                     for (int32_t f = workload.fbPairCount - 1; f >= 0; f--) {
                         const FramebufferPair &fbPair = workload.fbPairs[f];
-                        bool interpolationCandidate = fbPair.earlyPresentCandidate();
                         if (fbPair.drawColorRect.isEmpty()) {
                             continue;
                         }
 
                         const auto &colorImg = fbPair.colorImage;
+                        if (seenDrawnAddr.insert(colorImg.address).second) {
+                            allDrawn.push_back(colorImg.address);
+                        }
+
+                        bool interpolationCandidate = fbPair.earlyPresentCandidate();
                         if (colorSet.find(colorImg.address) != colorSet.end()) {
                             continue;
                         }
@@ -961,10 +974,14 @@ namespace RT64 {
 
                         Framebuffer *interpolationFb = fbManager.find(colorImg.address);
                         if ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled) {
+                            // Must match RenderTargetKey used in getTargetsFromPair (colorFb->addressStart/width/siz
+                            // after fbManager.get). fbPair.colorImage.width can lag the live Framebuffer width and
+                            // would hash to a different RenderTarget than the one the raster writes — present
+                            // then samples an unused VkImage (~1.0 on Mali) while draws hit the real target.
                             interpolationTargetKey.fbType = Framebuffer::Type::Color;
-                            interpolationTargetKey.address = fbPair.colorImage.address;
-                            interpolationTargetKey.siz = fbPair.colorImage.siz;
-                            interpolationTargetKey.width = fbPair.colorImage.width;
+                            interpolationTargetKey.address = interpolationFb->addressStart;
+                            interpolationTargetKey.siz = interpolationFb->siz;
+                            interpolationTargetKey.width = interpolationFb->width;
                             interpolationTargetFbPairIndex = f;
                         }
                     }
@@ -986,7 +1003,33 @@ namespace RT64 {
                     matchingProfiler.log();
 
                     const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > workload.viOriginalRate);
-                    generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
+                    // Phase 12 fix: in the non-MSAA path, interpolatedColorTargets[] are
+                    // created without a baseline copy from the canonical color target
+                    // (the MSAA path has resolveFromTarget at workload_queue.cpp:811-813,
+                    // there's no equivalent for non-MSAA). The result is that VI samples
+                    // an empty target on Mali (no MSAA support enabled), producing the
+                    // white-frame symptom. Gate interpolation on MSAA being active until
+                    // a non-MSAA baseline copy is implemented.
+                    const uint32_t sampleCount = ext.sharedResources->renderTargetManager.multisampling.sampleCount;
+                    const bool interpolationSafe = (sampleCount > 1);
+                    generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty() && interpolationSafe;
+
+                    // One-shot ALOG to confirm what we observe on the device.
+#                   ifdef __ANDROID__
+                    static std::atomic<int> s_diagLogged{0};
+                    if (s_diagLogged.fetch_add(1) < 5) {
+                        __android_log_print(ANDROID_LOG_INFO, "BK64-RT64",
+                            "interpGate: sampleCount=%u displayRateAbove=%d interpKeyEmpty=%d "
+                            "interpolationSafe=%d generate=%d viOrig=%u target=%u",
+                            sampleCount,
+                            displayRateAboveOriginal ? 1 : 0,
+                            interpolationTargetKey.isEmpty() ? 1 : 0,
+                            interpolationSafe ? 1 : 0,
+                            generateInterpolatedFrames ? 1 : 0,
+                            workload.viOriginalRate,
+                            workloadConfig.targetRate);
+                    }
+#                   endif
 
                     const bool resetTicks = !generateInterpolatedFrames || (originalRateForTicks != workload.viOriginalRate) || (displayRateForTicks != workloadConfig.targetRate) || !displayRateAboveOriginal;
                     if (resetTicks) {

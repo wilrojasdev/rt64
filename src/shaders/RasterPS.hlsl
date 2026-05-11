@@ -2,6 +2,15 @@
 // RT64
 //
 
+// Phase 12 status: the SV_TARGET1 / pixelAlpha dual-source output is BACK.
+// Removing it caused DXC to silently emit a 440-byte stub (entry point only,
+// no body) for the SPEC_CONSTANT_RENDER_PARAMS translation unit, which on
+// Mali rendered as the per-frame clear color (no fragments produced).
+// The Mali Valhall G57 SPEC_CONSTANT-not-rendering issue is being worked
+// around in C++ instead, by forcing the framebuffer renderer to keep using
+// the DYNAMIC ubershader (ubershadersOnly = true) on Android — the dynamic
+// variant DOES render fragments correctly on Mali.
+
 #include "shared/rt64_blender.h"
 #include "shared/rt64_color_combiner.h"
 #include "shared/rt64_raster_params.h"
@@ -46,8 +55,33 @@ float sampleBackgroundDepth(int2 pixelPos, uint sampleCount) {
 #endif
 
 LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float2 vertexUV, float4 vertexSmoothColor, float4 vertexFlatColor,
-    bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
+    bool isFrontFace, out float4 resultColor, out float4 resultAlpha)
 {
+    // Early `return false` paths skip the combiner; PSMain then `discard`s. Some Mali
+    // tilers have been observed to leave color attachment at ~1.0 when dual-source
+    // blend is off and fragment outputs were never assigned before discard — define
+    // the outs up front so every path has defined SPIR-V output values.
+    resultColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    resultAlpha = float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    // Controlled by CMake RT64_DIAG_RASTER_PS_MODE (passes -D to DXC). Default 0 = off.
+#if defined(RT64_DIAG_RASTER_PS_MODE)
+#if RT64_DIAG_RASTER_PS_MODE == 1
+    resultColor = float4(1.0f, 0.0f, 1.0f, 1.0f);
+    resultAlpha = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    return true;
+#elif RT64_DIAG_RASTER_PS_MODE == 2
+    // If the image is flat black, RenderParams may be all-zero or not reaching the shader.
+    resultColor = float4(
+        float(rp.omL & 0xFFu) / 255.0f,
+        float(rp.omH & 0xFFu) / 255.0f,
+        float(rp.flags & 0xFFu) / 255.0f,
+        1.0f);
+    resultAlpha = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    return true;
+#endif
+#endif
+
     const OtherMode otherMode = { rp.omL, rp.omH };
 #if defined(DYNAMIC_RENDER_PARAMS)
     if ((otherMode.cycleType() != G_CYC_COPY) && renderFlagCulling(rp.flags) && isFrontFace) {

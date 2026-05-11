@@ -294,7 +294,7 @@ namespace RT64 {
         if (desc.flags.smoothShade) {
             pss << "float4 vertexFlatColor = vertexSmoothColor;";
         }
-        
+
         pss <<
             "   float4 resultColor;"
             "   float4 resultAlpha;"
@@ -330,17 +330,22 @@ namespace RT64 {
         pipelineDesc.specConstantsCount = uint32_t(c.specConstants.size());
 
         // Alpha blending is performed by using dual source blending — the blend
-        // factor is written to the pixel shader's secondary output. On devices
-        // that don't support dualSrcBlend (Mali Valhall G57 on Samsung A24
-        // observed in Phase 11), fall back to single-source SRC_ALPHA / INV_SRC_ALPHA.
-        // This loses the precise N64 blender emulation but renders something
-        // instead of crashing the driver during pipeline creation.
+        // factor is written to the pixel shader's secondary output (pixelAlpha).
+        // The primary output's .a is the N64 coverage value, NOT a blend factor,
+        // so on devices without dualSrcBlend (Mali Valhall G57 on Samsung A24)
+        // we cannot fall back to SRC_ALPHA/INV_SRC_ALPHA — that mixes the source
+        // color into the destination using coverage as if it were translucency,
+        // which on a fresh white-cleared swap chain produces a uniform white
+        // frame because high-coverage pixels still let the white destination
+        // bleed through. Disable blend entirely when dual-source isn't
+        // available; we lose precise N64 blender emulation but every pixel
+        // now arrives at the swap chain as the rasterizer's actual color.
         const bool dualSrcBlendSupported = c.device->getCapabilities().dualSourceBlend;
         RenderBlendDesc &targetBlend = pipelineDesc.renderTargetBlend[0];
-        if (c.alphaBlend) {
+        if (c.alphaBlend && dualSrcBlendSupported) {
             targetBlend.blendEnabled = true;
-            targetBlend.srcBlend = dualSrcBlendSupported ? RenderBlend::SRC1_ALPHA : RenderBlend::SRC_ALPHA;
-            targetBlend.dstBlend = dualSrcBlendSupported ? RenderBlend::INV_SRC1_ALPHA : RenderBlend::INV_SRC_ALPHA;
+            targetBlend.srcBlend = RenderBlend::SRC1_ALPHA;
+            targetBlend.dstBlend = RenderBlend::INV_SRC1_ALPHA;
             targetBlend.blendOp = RenderBlendOperation::ADD;
         }
 

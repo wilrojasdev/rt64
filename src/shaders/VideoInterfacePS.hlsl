@@ -32,7 +32,39 @@ float4 PixelAntialiasing(float2 uv) {
     return SampleInput(uvTexspace / gConstants.textureResolution);
 }
 
+
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+    // CMake RT64_DIAG_VI_MODE → DXC -D (see lib/rt64/CMakeLists.txt).
+    //   1 = solid cyan (proves VI PS reaches swapchain).
+    //   2 = raw sample of gInput, no AA / no gamma / no border clamp (shows what the
+    //       colorTarget VI samples actually contains — white = ~1.0/undefined, black
+    //       = cleared/zero, anything else = real raster output landed where expected).
+    //   3 = UV grid (red=u, green=v) — proves the PS executes per-pixel and has valid
+    //       UVs, independent of any sampling.
+    //   4 = channel classifier of gInput sample. Decides per-pixel from a single sample:
+    //       red    → all channels > 0.9 (undefined memory / saturated white from Mali)
+    //       green  → all channels < 0.05 (texture is genuinely zero — clear works,
+    //                raster never wrote here, identity divergence confirmed)
+    //       blue   → anything in between (real game content)
+    //       black  → mixed extremes (some saturated, some zero — partial write?)
+#if defined(RT64_DIAG_VI_MODE)
+#if RT64_DIAG_VI_MODE == 1
+    return float4(0.0f, 1.0f, 1.0f, 1.0f);
+#elif RT64_DIAG_VI_MODE == 2
+    return float4(gInput.SampleLevel(gSampler, uv, 0).rgb, 1.0f);
+#elif RT64_DIAG_VI_MODE == 3
+    return float4(uv.x, uv.y, 0.0f, 1.0f);
+#elif RT64_DIAG_VI_MODE == 4
+    {
+        float3 s = gInput.SampleLevel(gSampler, uv, 0).rgb;
+        bool allHigh = (s.r > 0.9f) && (s.g > 0.9f) && (s.b > 0.9f);
+        bool allLow  = (s.r < 0.05f) && (s.g < 0.05f) && (s.b < 0.05f);
+        if (allHigh) return float4(1.0f, 0.0f, 0.0f, 1.0f); // red = saturated white
+        if (allLow)  return float4(0.0f, 1.0f, 0.0f, 1.0f); // green = zeroed
+        return float4(0.0f, 0.0f, 1.0f, 1.0f);              // blue = real content
+    }
+#endif
+#endif
 #ifdef PIXEL_ANTIALIASING
     return PixelAntialiasing(uv);
 #else

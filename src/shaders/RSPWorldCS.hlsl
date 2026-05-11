@@ -12,10 +12,13 @@ struct RSPWorldCB {
 };
 
 [[vk::push_constant]] ConstantBuffer<RSPWorldCB> gConstants : register(b0);
-Buffer<float> srcPos : register(t1);
-Buffer<float> srcVel : register(t2);
-Buffer<int> srcNorm : register(t3);
-Buffer<uint> srcIndices : register(t4);
+// Phase 12: explicit SPIR-V image format annotations match the runtime
+// VkBufferView formats. See RSPProcessCS.hlsl for rationale (Mali strict
+// aliasing).
+[[vk::image_format("r32f")]]  Buffer<float> srcPos : register(t1);
+[[vk::image_format("r32f")]]  Buffer<float> srcVel : register(t2);
+[[vk::image_format("r8i")]]   Buffer<int>   srcNorm : register(t3);
+[[vk::image_format("r16ui")]] Buffer<uint>  srcIndices : register(t4);
 StructuredBuffer<float4x4> worldMats : register(t5);
 StructuredBuffer<float4x4> invTWorldMats : register(t6);
 StructuredBuffer<float4x4> prevWorldMats : register(t7);
